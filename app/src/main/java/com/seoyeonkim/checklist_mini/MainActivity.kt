@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -25,56 +26,95 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.util.UUID
 
 // 1. [데이터 모델] 체크리스트의 한 줄(항목)을 담당하는 설계도입니다.
 data class CheckItem(
-    val id: Long = System.currentTimeMillis(), // 각 항목을 구별하는 고유 번호 (시간으로 생성)
-    val title: String,                         // 할 일 내용
-    val isChecked: Boolean = false             // 완료 여부 (기본값은 false)
+    val id: String = UUID.randomUUID().toString(),      // ID
+    val title: String,                                  // 할 일 내용
+    val isChecked: Boolean = false,                     // 완료 여부 (기본값은 false)
+    val createdAt: Long = System.currentTimeMillis()    // 생성 시간
 )
+
+enum class Filter { All, Done, Active }
+
+data class UiState(
+    val items: List<CheckItem> = emptyList(),
+    val input: String = "",
+    val filter: Filter = Filter.All,
+    val error: String? = null,
+)
+
+sealed interface UiEvent {
+    data class InputChanged(val value: String) : UiEvent
+    data object AddClicked : UiEvent
+    data class ToggleDone(val id: String) : UiEvent
+    data class Delete(val id: String) : UiEvent
+    data class FilterChanged(val filter: Filter) : UiEvent
+    data object ErrorConsumed : UiEvent
+}
 
 // 2. [ViewModel] 화면의 "두뇌" 역할입니다. 데이터를 저장하고 관리합니다.
 // 화면이 회전되어도 이 안에 있는 데이터는 사라지지 않습니다.
 class ChecklistViewModel : ViewModel() {
     // 체크리스트 목록 (초기값은 비어있는 리스트)
-    private val _items = MutableStateFlow<List<CheckItem>>(emptyList())
-    val items: StateFlow<List<CheckItem>> = _items.asStateFlow()
+    private val _uiState = MutableStateFlow(UiState())
+    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    // 입력창에 쓰고 있는 텍스트
-    private val _inputText = MutableStateFlow("")
-    val inputText: StateFlow<String> = _inputText.asStateFlow()
-
-    // 사용자가 글자를 칠 때마다 호출되어 값을 업데이트합니다.
-    fun onInputChange(newText: String) {
-        _inputText.value = newText
-    }
-
-    // [추가] 버튼을 누르면 호출됩니다.
-    fun addItem() {
-        if (_inputText.value.isNotBlank()) { // 내용이 있을 때만
-            _items.update { currentList ->
-                // 기존 리스트 뒤에 새로운 항목을 붙입니다.
-                currentList + CheckItem(id = System.currentTimeMillis(), title = _inputText.value)
+    fun onEvent(event: UiEvent) {
+        when (event) {
+            is UiEvent.InputChanged -> {
+                _uiState.update { it.copy(input = event.value, error = null) }
             }
-            _inputText.value = "" // 입력창을 다시 비워줍니다.
-        }
-    }
 
-    // [체크/해제] 항목을 누르면 완료 상태를 뒤집습니다.
-    fun toggleItem(item: CheckItem) {
-        _items.update { currentList ->
-            currentList.map {
-                // ID가 같은 항목을 찾아서 isChecked를 반대로 바꿉니다.
-                if (it.id == item.id) it.copy(isChecked = !it.isChecked) else it
+            is UiEvent.AddClicked -> {
+                val text = uiState.value.input.trim()
+                if (text.isBlank()) {
+                    _uiState.update { it.copy(error = "할 일을 입력해줘.") }
+                } else {
+                    val newItem = CheckItem(
+                        id = UUID.randomUUID().toString(),
+                        title = text,
+                        isChecked = false,
+                        createdAt = System.currentTimeMillis()
+                    )
+
+                    _uiState.update { s ->
+                        s.copy(
+                            items = s.items + newItem,
+                            input = "",
+                            error = null
+                        )
+                    }
+                }
             }
-        }
-    }
 
-    // [삭제] 휴지통 버튼을 누르면 호출됩니다.
-    fun deleteItem(item: CheckItem) {
-        _items.update { currentList ->
-            // ID가 같지 않은 것들만 남깁니다 (즉, 삭제할 항목을 제외함).
-            currentList.filter { it.id != item.id }
+            is UiEvent.ToggleDone -> {
+                _uiState.update { s ->
+                    s.copy(
+                        items = s.items.map {
+                            if (it.id == event.id) it.copy(isChecked = !it.isChecked) else it
+                        }
+                    )
+                }
+            }
+
+            is UiEvent.Delete -> {
+                _uiState.update { s ->
+                    s.copy(
+                        items = s.items.filter { it.id != event.id }
+                    )
+                }
+            }
+
+            is UiEvent.FilterChanged -> {
+                _uiState.update { s -> s.copy(filter = event.filter) }
+
+            }
+
+            is UiEvent.ErrorConsumed -> {
+                _uiState.update { s -> s.copy(error = null) }
+            }
         }
     }
 }
@@ -104,52 +144,106 @@ fun ChecklistScreen(
     // viewModel을 여기서 가져옵니다. (앱이 실행될 때 자동으로 생성됨)
     viewModel: ChecklistViewModel = viewModel()
 ) {
-    // ViewModel에 있는 데이터를 "구독"합니다. 데이터가 바뀌면 화면이 자동으로 다시 그려집니다.
-    val items by viewModel.items.collectAsState()
-    val inputText by viewModel.inputText.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
 
-    // 요약 정보를 계산합니다.
-    val totalCount = items.size
-    val doneCount = items.count { it.isChecked }
+    CheckListContent (
+        uiState = uiState,
+        onEvent = viewModel::onEvent
+    )
+}
+
+// 4. Content: "UiState만 보고 렌더링" + "UiEvent만 올림"
+@Composable
+fun CheckListContent(
+    uiState: UiState,
+    onEvent: (UiEvent) -> Unit
+) {
+    // rememberLazyListState는 화면 회전 등의 구성 변경 시에도 스크롤 위치를 유지해줍니다.
+    val listState = rememberLazyListState()
+
+    val totalCount = uiState.items.size
+    val doneCount = uiState.items.count { it.isChecked }
     val activeCount = totalCount - doneCount
 
-    // Column: 요소를 세로로 배치합니다.
+    val visibleItems = remember(uiState.items, uiState.filter) {
+        when (uiState.filter) {
+            Filter.All -> uiState.items
+            Filter.Done -> uiState.items.filter { it.isChecked }
+            Filter.Active -> uiState.items.filterNot { it.isChecked }
+        }
+    }
+
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
+        modifier = Modifier.fillMaxSize().padding(16.dp),
     ) {
-        // 상단 요약 카드
         SummaryView(total = totalCount, done = doneCount, active = activeCount)
 
-        Spacer(modifier = Modifier.height(16.dp)) // 여백
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // 리스트 (스크롤 가능한 영역)
+        FilterRow(
+            selected = uiState.filter,
+            onSelected = { onEvent(UiEvent.FilterChanged(it)) }
+        )
+
+        Spacer(modifier = Modifier.height(12.dp))
+
         LazyColumn(
-            modifier = Modifier.weight(1f), // 남은 공간을 꽉 채웁니다.
-            verticalArrangement = Arrangement.spacedBy(8.dp) // 항목 간 간격
+            state = listState,
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(items = items, key = { it.id }) { item ->
+            items(items = visibleItems, key = { it.id }) { item ->
                 ChecklistItemRow(
                     item = item,
-                    onToggle = { viewModel.toggleItem(item) },
-                    onDelete = { viewModel.deleteItem(item) }
+                    onToggle = { onEvent(UiEvent.ToggleDone(item.id)) },
+                    onDelete = { onEvent(UiEvent.Delete(item.id)) }
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // 하단 입력창
         InputArea(
-            text = inputText,
-            onTextChange = viewModel::onInputChange,
-            onAdd = viewModel::addItem
+            text = uiState.input,
+            onTextChange = { onEvent(UiEvent.InputChanged(it)) },
+            onAdd = { onEvent(UiEvent.AddClicked) }
+        )
+
+        if (uiState.error != null) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = uiState.error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+
+@Composable
+fun FilterRow(
+    selected: Filter,
+    onSelected: (Filter) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+            selected = selected == Filter.All,
+            onClick = { onSelected(Filter.All) },
+            label = { Text("전체") }
+        )
+        FilterChip(
+            selected = selected == Filter.Done,
+            onClick = { onSelected(Filter.Done) },
+            label = { Text("완료") }
+        )
+        FilterChip(
+            selected = selected == Filter.Active,
+            onClick = { onSelected(Filter.Active) },
+            label = { Text("미완료") }
         )
     }
 }
 
-// [UI 컴포넌트] 요약 정보를 보여주는 카드
 @Composable
 fun SummaryView(total: Int, done: Int, active: Int) {
     Card(
@@ -160,43 +254,37 @@ fun SummaryView(total: Int, done: Int, active: Int) {
             modifier = Modifier
                 .padding(16.dp)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly // 가로로 균등 배치
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             Text("전체: $total")
-            Text("완료: $done", color = MaterialTheme.colorScheme.primary) // 파란색 계열
-            Text("미완료: $active", color = MaterialTheme.colorScheme.error) // 빨간색 계열
+            Text("완료: $done", color = MaterialTheme.colorScheme.primary)
+            Text("미완료: $active", color = MaterialTheme.colorScheme.error)
         }
     }
 }
 
-// [UI 컴포넌트] 리스트의 한 줄(체크박스 + 텍스트 + 삭제버튼)
 @Composable
 fun ChecklistItemRow(
     item: CheckItem,
     onToggle: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    Card(elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp, horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 체크박스
             Checkbox(checked = item.isChecked, onCheckedChange = { onToggle() })
 
-            // 할 일 텍스트
             Text(
                 text = item.title,
-                modifier = Modifier.weight(1f), // 중간 공간 차지
-                textDecoration = if (item.isChecked) TextDecoration.LineThrough else null, // 완료 시 취소선
+                modifier = Modifier.weight(1f),
+                textDecoration = if (item.isChecked) TextDecoration.LineThrough else null,
                 color = if (item.isChecked) Color.Gray else Color.Black
             )
 
-            // 삭제 아이콘 버튼
             IconButton(onClick = onDelete) {
                 Icon(imageVector = Icons.Default.Delete, contentDescription = "삭제", tint = Color.Gray)
             }
@@ -204,7 +292,6 @@ fun ChecklistItemRow(
     }
 }
 
-// [UI 컴포넌트] 입력창과 추가 버튼
 @Composable
 fun InputArea(
     text: String,
